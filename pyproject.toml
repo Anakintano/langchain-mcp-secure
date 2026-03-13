@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langchain-mcps"
+version = "0.1.0"
+description = "MCPS (MCP Secure) integration for LangChain -- cryptographic identity and trust verification for AI agents."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [{name = "CyberSecAI Ltd"}]
+keywords = [
+    "langchain", "mcps", "mcp-secure", "agent-security",
+    "agent-identity", "passport", "ecdsa", "trust",
+    "owasp", "agentsign", "ai-agent", "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "mcp-secure>=1.0.0",
+    "langchain-core>=0.2.0",
+]
+
+[project.urls]
+Homepage = "https://agentsign.dev"
+Repository = "https://github.com/razashariff/langchain-mcps"
+Documentation = "https://agentsign.dev/docs/langchain"
+
+[tool.setuptools.packages.find]
+include = ["langchain_mcps*"]
