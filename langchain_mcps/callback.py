@@ -191,6 +191,10 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         tool_name = serialized.get("name", "unknown")
         current_time = self._current_time_provider()
 
+        # Implicit deny: tool must be listed in capabilities (v2.0+)
+        if schema.is_v2 and not schema.is_tool_allowed(tool_name):
+            self._reject("tool_start", f"tool_not_allowed: '{tool_name}' not in passport capabilities")
+
         # Check time windows
         if schema.is_v2:
             time_valid, time_reason = validator.validate_time_window(tool_name, current_time)
