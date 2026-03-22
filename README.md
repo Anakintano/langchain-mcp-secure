@@ -73,6 +73,36 @@ result = secure_chain.invoke({"question": "hello"})
 - **Replay protection** -- nonce-based replay attack prevention (passports + delegation tokens)
 - **Zero config** -- works with any LangChain Runnable (chains, agents, tools)
 
+## Security Architecture
+
+langchain-mcps provides 5 progressive security layers, each building on the previous:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  v2.3: Delegation Chains                            │
+│  ↑ Transitive trust (Agent A → Agent B → Tool)      │
+├─────────────────────────────────────────────────────┤
+│  v2.2: Time-Bound Ephemeral Permissions             │
+│  ↑ When can you act? (time windows + approval gates)│
+├─────────────────────────────────────────────────────┤
+│  v2.1: Merkle-Chain Audit Log                       │
+│  ↑ What did you do? (tamper-proof, non-repudiation) │
+├─────────────────────────────────────────────────────┤
+│  v2.0: Capability-Scoped Passports                  │
+│  ↑ What can you do? (least-privilege constraints)   │
+├─────────────────────────────────────────────────────┤
+│  v1.0: Passport Identity & Verification             │
+│  ↑ Who are you? (ECDSA P-256 signature)             │
+└─────────────────────────────────────────────────────┘
+```
+
+Each layer adds a security guarantee:
+- **v1.0:** Authenticate — who are you?
+- **v2.0:** Authorize — what can you do?
+- **v2.1:** Audit — what did you do?
+- **v2.2:** Time-bound — when can you do it?
+- **v2.3:** Delegate — can you authorize others?
+
 ## Trust Levels
 
 | Level | Name | Meaning |
@@ -252,6 +282,55 @@ v2.1 is fully backward compatible with v1.0:
 
 Agent A can securely delegate limited work to Agent B using time-limited, scoped delegation tokens. B cannot escalate beyond A's permissions — this is enforced at the protocol level by the token structure itself.
 
+### How Delegation Works
+
+Token creation, presentation, verification, and execution across 4 phases:
+
+```
+PHASE 1: Creation          PHASE 2: Present           PHASE 3: Verify            PHASE 4: Execute & Audit
+──────────────────         ─────────────────          ────────────────           ─────────────────────────
+Agent A                    Agent B                    MCPSCallbackHandler        System
+  │                          │                           │                           │
+  ├─ Create JWT token        │                           │                           │
+  │  ├─ iss: agent-a         │                           │                           │
+  │  ├─ sub: agent-b         │                           │                           │
+  │  ├─ exp: +30 min         │                           │                           │
+  │  ├─ jti: abc123          │                           │                           │
+  │  └─ capabilities:        │                           │                           │
+  │     {database_read:      │                           │                           │
+  │      [customers]}        │                           │                           │
+  │                          │                           │                           │
+  ├─ Sign (ECDSA P-256)      │                           │                           │
+  │                          │                           │                           │
+  └─────── token_jwt ───────→├─ Invoke tool with:       │                           │
+                             │  ├─ B's passport         │                           │
+                             │  ├─ delegation_token     │                           │
+                             │  └─ tool_call            │                           │
+                             │                          │                           │
+                             └──────────────────────────┤                           │
+                                                        ├─ STEP 1: B's passport ✓  │
+                                                        ├─ STEP 2: JWT structure ✓  │
+                                                        ├─ STEP 3: A's sig ✓        │
+                                                        ├─ STEP 4: TTL/nonce ✓      │
+                                                        ├─ STEP 5: caps ⊆ A's ✓     │
+                                                        ├─ STEP 6: chain depth ✓    │
+                                                        │  → ALLOW                  │
+                                                        │                           ├─ Execute tool
+                                                        │                           │  (database_read,
+                                                        │                           │   customers)
+                                                        │                           │
+                                                        │                           ├─ Append to audit chain:
+                                                        │                           │  {action: delegation_used,
+                                                        │                           │   agent_b, delegated_from: a,
+                                                        │                           │   jti: abc123,
+                                                        │                           │   entry_hash: sha256(...)}
+                                                        │                           │
+                                                        │                           └─ Merkle linked to
+                                                        │                              previous_hash
+```
+
+The verification gate (Phase 3) is the security-critical path: 6 sequential checks, any failure raises `PermissionError` and logs the rejection to the audit chain before the tool is ever invoked.
+
 ### Quick Example
 
 ```python
@@ -349,6 +428,46 @@ Built on proven authorization patterns:
 - **AWS IAM policy intersection** — privilege escalation prevention
 - **RFC 8693 Token Exchange** — standardized JWT delegation format (used by Azure AD, ZITADEL)
 - **SAML AssertionID nonce cache** — replay prevention
+
+---
+
+## Security Properties
+
+Each layer prevents a distinct class of threat:
+
+```
+Layer              Threat Prevented         Mechanism                          Status
+────────────────────────────────────────────────────────────────────────────────────
+v1.0  Identity     Impersonation            ECDSA P-256 signature              ✅ Prevents
+                                            Only the passport holder can
+                                            produce a valid signature
+
+v2.0  Capability   Privilege escalation     Implicit deny + constraints        ✅ Prevents
+                                            Tool not listed → rejected
+                                            allowed_tables enforced per call
+
+v2.1  Audit        Tampering / denial       SHA256 merkle-chain linking        ✅ Prevents
+                                            Modify any entry → chain breaks
+                                            verify_chain() returns False
+
+v2.2  Time-bound   Unauthorized timing      Time window + gate enforcement     ✅ Prevents
+                                            Outside window → rejected
+                                            Gate callback must approve
+
+v2.3  Delegation   Over-delegation          Capability intersection            ✅ Prevents
+                                            B's perms ⊆ A's perms (protocol)
+                                            B cannot escalate beyond A
+```
+
+### Threat Model Coverage
+
+- ✅ **Impersonation** — Agent cannot fake identity (ECDSA signature)
+- ✅ **Privilege escalation** — Agent cannot exceed granted permissions (intersection)
+- ✅ **Tampering** — Audit trail cannot be modified (merkle chain)
+- ✅ **Unauthorized timing** — Agent cannot act outside allowed windows (time checks)
+- ✅ **Over-delegation** — Delegatee cannot grant more than delegator has (constraint intersection)
+- ✅ **Token forgery** — Delegation token requires delegator's private key (ECDSA P-256)
+- ✅ **Replay attacks** — JTI nonce cache + TTL (passports + delegation tokens)
 
 ---
 
