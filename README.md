@@ -67,6 +67,7 @@ result = secure_chain.invoke({"question": "hello"})
 - **Trust levels** -- enforce minimum trust (L0 Unsigned through L4 Audited)
 - **Revocation checks** -- optional live revocation via AgentSign Trust Authority
 - **Merkle-chain audit logs** (v2.1) -- cryptographically tamper-evident audit trail with SHA256 chain hashing
+- **Time-bound ephemeral permissions** (v2.2) -- grant temporary tool access via time windows and event gates
 - **Audit trail** -- full log of verified/rejected events
 - **Replay protection** -- nonce-based replay attack prevention
 - **Zero config** -- works with any LangChain Runnable (chains, agents, tools)
@@ -97,6 +98,8 @@ result = secure_chain.invoke({"question": "hello"})
 | `on_rejected` | callable | None | Callback on failed verification |
 | `on_action` | callable | None | Callback with signed action envelopes |
 | `on_merkle_root_finalized` | callable | None | Callback when merkle root is finalized (v2.1) |
+| `on_permission_gate_triggered` | callable | None | Gate callback `(tool, gate_config) → (bool, str)` (v2.2) |
+| `current_time_provider` | callable | `time.time` | Time source override for testing (v2.2) |
 
 ### Properties & Methods (v2.1)
 
@@ -136,6 +139,81 @@ signed_root = handler.sign_merkle_root()
 ### `with_mcps(chain, passport, authority_public_key, **kwargs)`
 
 Convenience wrapper. Returns an `MCPSChainWrapper` with `.invoke()`, `.ainvoke()`, `.stream()`, `.batch()`.
+
+---
+
+## v2.2: Time-Bound Ephemeral Permissions
+
+Grant temporary, time-window-based tool access. Tools can be restricted to specific time intervals (e.g., maintenance windows, contractor access, emergency escalations).
+
+### Passport Capabilities Schema (v2.2)
+
+```python
+signed_passport["capabilities"] = {
+    "database_write": {
+        "allowed": True,
+        "constraints": {},
+        "permission_windows": [
+            # Only allowed Saturday 2am-4am UTC
+            {"start_time": 1711324800.0, "end_time": 1711332000.0},
+        ],
+    },
+    "send_email": {
+        "allowed": True,
+        "constraints": {"recipient_domains": ["example.com"]},
+        # No permission_windows = always allowed during valid passport
+    },
+    "escalated_delete": {
+        "allowed": True,
+        "constraints": {},
+        "permission_gates": [
+            {"gate_type": "manual_approval", "config": {"approval_required": True}}
+        ],
+    },
+    "file_delete": {"allowed": False},  # Explicitly forbidden
+}
+```
+
+### Time Windows
+
+- **Interval:** `[start_time, end_time)` — inclusive start, exclusive end
+- **Logic:** OR — agent is allowed if current time falls in ANY window
+- **No windows field:** tool is always allowed (backward compatible)
+- **Empty windows list `[]`:** tool is never allowed
+
+```python
+handler = MCPSCallbackHandler(
+    passport=signed_passport,
+    authority_public_key=authority_keys["public_key"],
+    current_time_provider=lambda: time.time(),  # injectable for testing
+)
+```
+
+### Permission Gates
+
+Gates require an external decision before a tool can be invoked. The `on_permission_gate_triggered` callback must return `(is_allowed: bool, reason: str)`.
+
+```python
+def my_approval_gate(tool_name, gate_config):
+    approved = approval_service.check(tool_name)
+    return approved, "approved" if approved else "awaiting_approval"
+
+handler = MCPSCallbackHandler(
+    passport=signed_passport,
+    authority_public_key=authority_keys["public_key"],
+    on_permission_gate_triggered=my_approval_gate,
+)
+```
+
+### Implicit Deny (v2.0+)
+
+Any tool **not listed** in a v2.0+ passport's capabilities dict is automatically rejected.
+
+### Backward Compatibility
+
+- v1.0 passports (no capabilities) allow all tools at any time
+- v2.0/v2.1 passports without `permission_windows` allow tools at any time
+- Only passports with `permission_windows` enforce time restrictions
 
 ---
 
