@@ -68,8 +68,9 @@ result = secure_chain.invoke({"question": "hello"})
 - **Revocation checks** -- optional live revocation via AgentSign Trust Authority
 - **Merkle-chain audit logs** (v2.1) -- cryptographically tamper-evident audit trail with SHA256 chain hashing
 - **Time-bound ephemeral permissions** (v2.2) -- grant temporary tool access via time windows and event gates
-- **Audit trail** -- full log of verified/rejected events
-- **Replay protection** -- nonce-based replay attack prevention
+- **Delegation chains** (v2.3) -- agent-to-agent authorization with privilege escalation prevention
+- **Audit trail** -- full log of verified/rejected events including delegation events
+- **Replay protection** -- nonce-based replay attack prevention (passports + delegation tokens)
 - **Zero config** -- works with any LangChain Runnable (chains, agents, tools)
 
 ## Trust Levels
@@ -244,5 +245,109 @@ v2.1 is fully backward compatible with v1.0:
 - v1.0 passports (no capabilities) still work
 - v1.0 audit logs still accessible via `handler.audit_log`
 - v2.1 just adds hash fields to each entry
+
+---
+
+## v2.3 Delegation Chains (Agent-to-Agent Authorization)
+
+Agent A can securely delegate limited work to Agent B using time-limited, scoped delegation tokens. B cannot escalate beyond A's permissions — this is enforced at the protocol level by the token structure itself.
+
+### Quick Example
+
+```python
+from mcp_secure import generate_key_pair, create_passport, sign_passport
+from langchain_mcps import MCPSCallbackHandler
+from langchain_mcps.delegation import DelegationToken
+
+# Agent A creates a delegation token for Agent B
+delegator_caps = {
+    "database_read": {
+        "allowed": True,
+        "constraints": {"allowed_tables": ["customers", "orders", "payments"]},
+    }
+}
+
+# B gets access only to "customers" — subset of A's tables
+token = DelegationToken.create(
+    delegator_agent_id=agent_a_passport["passport_id"],
+    delegatee_agent_id=agent_b_passport["passport_id"],
+    delegator_capabilities=delegator_caps,
+    requested_capabilities={
+        "database_read": {
+            "allowed": True,
+            "constraints": {"allowed_tables": ["customers"]},
+        }
+    },
+    ttl_seconds=1800,   # 30 min
+)
+token_jwt = token.to_jwt(agent_a_private_key)
+
+# Agent B uses the delegation token
+handler = MCPSCallbackHandler(
+    passport=agent_b_passport,
+    authority_public_key=authority_public_key,
+    delegation_token_jwt=token_jwt,
+    delegator_passport=agent_a_passport,   # provides A's public key
+)
+handler.on_tool_start({"name": "database_read"}, "SELECT * FROM customers")
+# Tool executes — delegation verified, action audited
+```
+
+### 6-Step Verification Gate
+
+Every tool call goes through six security checks:
+
+| Step | Check | What it prevents |
+|------|-------|-----------------|
+| 1 | Delegatee passport (v1.0) | Unidentified agents |
+| 2 | JWT structure + ES256 | Malformed tokens |
+| 3 | ECDSA P-256 signature | Forged tokens |
+| 4 | TTL + JTI nonce + revocation | Expired/replayed/revoked tokens |
+| **5** | **Capability intersection** | **Privilege escalation** |
+| 6 | Subject + parent ID + depth | Chain splicing |
+
+Step 5 is the critical security guarantee: the token itself carries `intersection(A's caps, requested scope)`. If B requests a table A doesn't have, the intersection is empty and the request is denied — regardless of what B's own passport says.
+
+### Shared Quota Pool
+
+All of A's delegates share one rate-limit pool, preventing any single delegate from exhausting the parent's budget:
+
+```python
+# A has rate_limit=100/hour for database_read
+# A delegates to B and C (both use parent pool key)
+
+# B uses 60 calls  → 40 remaining in pool
+# C uses 40 calls  → 0 remaining
+# Any further calls by B or C are rejected
+```
+
+### Audit Trail
+
+All delegation events are merkle-chained in the existing AuditChain:
+
+```
+delegation_verified  →  tool_start  →  chain_end
+       │                    │               │
+    entry_hash ──────── prev_hash    prev_hash
+```
+
+Call `handler.verify_audit_chain()` to prove the complete delegation trail is tamper-evident.
+
+### Security Properties
+
+| Threat | Defense |
+|--------|---------|
+| Privilege escalation | Token caps = intersection (protocol-level, not convention) |
+| Token forgery | ECDSA P-256 — requires delegator's private key |
+| Replay attack | JTI nonce cache + short TTL (default 30 min) |
+| Quota bypass | Shared pool keyed by `(parent_id, tool_name)` |
+| Non-repudiation | Merkle-chained audit events with delegation context |
+
+### Design References
+
+Built on proven authorization patterns:
+- **AWS IAM policy intersection** — privilege escalation prevention
+- **RFC 8693 Token Exchange** — standardized JWT delegation format (used by Azure AD, ZITADEL)
+- **SAML AssertionID nonce cache** — replay prevention
 
 
