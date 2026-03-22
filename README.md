@@ -100,13 +100,4 @@ result = secure_chain.invoke({"question": "hello"})
 
 Convenience wrapper. Returns an `MCPSChainWrapper` with `.invoke()`, `.ainvoke()`, `.stream()`, `.batch()`.
 
-## Related
 
-- [mcp-secure](https://pypi.org/project/mcp-secure/) -- Core MCPS Python library
-- [mcp-secure (npm)](https://www.npmjs.com/package/mcp-secure) -- Core MCPS Node.js library
-- [AgentSign](https://agentsign.dev) -- Zero Trust Engine for AI Agents
-- [OWASP Agentic AI](https://genai.owasp.org/) -- Security framework for AI agents
-
-## License
-
-MIT -- CyberSecAI Ltd
