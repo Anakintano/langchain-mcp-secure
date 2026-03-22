@@ -4,7 +4,7 @@ Verifies agent identity and signs actions at every step of the chain.
 """
 
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 from langchain_core.callbacks import BaseCallbackHandler
 from mcp_secure import (
     verify_passport_signature,
@@ -15,12 +15,17 @@ from mcp_secure import (
     TRUST_LEVELS,
 )
 
+from .audit_chain import AuditChain
+
 
 class MCPSCallbackHandler(BaseCallbackHandler):
     """LangChain callback handler that enforces MCPS identity verification.
 
     Verifies agent passport on chain/tool/agent start events.
-    Optionally signs outgoing actions and logs audit trail.
+    Optionally signs outgoing actions and logs a cryptographically-chained audit trail.
+
+    v2.1: Audit log is now a merkle-chain — each entry commits to the previous
+    entry via SHA256. Call `handler.merkle_root` to get the current root hash.
 
     Args:
         passport: Signed passport dict (from mcp_secure.create_passport + sign_passport)
@@ -32,6 +37,7 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         on_verified: Callback(passport_id, event) on successful verification
         on_rejected: Callback(passport_id, reason) on failed verification
         on_action: Callback(signed_envelope) for audit logging
+        on_merkle_root_finalized: Callback(root, signature) when merkle root is finalized (optional)
     """
 
     def __init__(
@@ -42,9 +48,10 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         min_trust_level: int = TRUST_LEVELS["IDENTIFIED"],
         verify_revocation: bool = False,
         trust_authority: str = "https://agentsign.dev",
-        on_verified: Optional[Any] = None,
-        on_rejected: Optional[Any] = None,
-        on_action: Optional[Any] = None,
+        on_verified: Optional[Callable] = None,
+        on_rejected: Optional[Callable] = None,
+        on_action: Optional[Callable] = None,
+        on_merkle_root_finalized: Optional[Callable] = None,
     ):
         self.passport = passport
         self.authority_public_key = authority_public_key
@@ -55,9 +62,10 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         self.on_verified = on_verified
         self.on_rejected = on_rejected
         self.on_action = on_action
+        self.on_merkle_root_finalized = on_merkle_root_finalized
         self._verified = False
         self._passport_id = passport.get("passport_id", "")
-        self._audit_log: List[Dict] = []
+        self._audit_chain = AuditChain()
 
     def _verify_identity(self, event: str) -> bool:
         """Core verification -- passport format, signature, expiry, trust level, revocation."""
@@ -94,17 +102,16 @@ class MCPSCallbackHandler(BaseCallbackHandler):
             self.on_verified(self._passport_id, event)
         return True
 
-    def _reject(self, event: str, reason: str):
+    def _reject(self, event: str, reason: str) -> None:
         """Handle rejection."""
         self._verified = False
-        entry = {
+        self._audit_chain.append({
             "timestamp": time.time(),
             "event": event,
             "passport_id": self._passport_id,
             "action": "rejected",
             "reason": reason,
-        }
-        self._audit_log.append(entry)
+        })
         if self.on_rejected:
             self.on_rejected(self._passport_id, reason)
         raise PermissionError(
@@ -117,13 +124,12 @@ class MCPSCallbackHandler(BaseCallbackHandler):
             return None
         msg = {"event": event, **data}
         envelope = sign_message(msg, self._passport_id, self.private_key)
-        entry = {
+        self._audit_chain.append({
             "timestamp": time.time(),
             "event": event,
             "passport_id": self._passport_id,
             "action": "signed",
-        }
-        self._audit_log.append(entry)
+        })
         if self.on_action:
             self.on_action(envelope)
         return envelope
@@ -166,7 +172,7 @@ class MCPSCallbackHandler(BaseCallbackHandler):
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs) -> None:
         """Log chain completion."""
-        self._audit_log.append({
+        self._audit_chain.append({
             "timestamp": time.time(),
             "event": "chain_end",
             "passport_id": self._passport_id,
@@ -175,7 +181,7 @@ class MCPSCallbackHandler(BaseCallbackHandler):
 
     def on_chain_error(self, error: BaseException, **kwargs) -> None:
         """Log chain errors."""
-        self._audit_log.append({
+        self._audit_chain.append({
             "timestamp": time.time(),
             "event": "chain_error",
             "passport_id": self._passport_id,
@@ -187,7 +193,8 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         pass
 
     def on_tool_error(self, error: BaseException, **kwargs) -> None:
-        self._audit_log.append({
+        """Log tool errors."""
+        self._audit_chain.append({
             "timestamp": time.time(),
             "event": "tool_error",
             "passport_id": self._passport_id,
@@ -205,8 +212,48 @@ class MCPSCallbackHandler(BaseCallbackHandler):
 
     @property
     def audit_log(self) -> List[Dict]:
-        """Return the audit trail."""
-        return list(self._audit_log)
+        """Return the audit trail as a list of dicts (backward compatible with v1.0).
+
+        Each entry includes v2.1 fields: entry_hash, previous_entry_hash.
+        """
+        return self._audit_chain.to_dict()
+
+    @property
+    def merkle_root(self) -> Optional[str]:
+        """Return the current merkle root (entry_hash of last audit entry).
+
+        Lazily computed — zero cost when not accessed.
+
+        Returns:
+            SHA256 hex string, or None if no audit entries yet.
+        """
+        return self._audit_chain.get_merkle_root()
+
+    def sign_merkle_root(self) -> Optional[Dict]:
+        """Sign the current merkle root using the agent's private key.
+
+        Returns:
+            Signed envelope dict, or None if no private key or empty chain.
+        """
+        root = self.merkle_root
+        if root is None or not self.private_key:
+            return None
+        envelope = sign_message(
+            {"merkle_root": root, "passport_id": self._passport_id},
+            self._passport_id,
+            self.private_key,
+        )
+        if self.on_merkle_root_finalized:
+            self.on_merkle_root_finalized(root, envelope)
+        return envelope
+
+    def verify_audit_chain(self) -> bool:
+        """Verify the cryptographic integrity of the audit chain.
+
+        Returns:
+            True if chain is intact, False if tampered.
+        """
+        return self._audit_chain.verify_chain()
 
     @property
     def is_verified(self) -> bool:
