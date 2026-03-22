@@ -1,0 +1,34 @@
+================================================================================
+⚠️  IMPORTANT: PRESENTATION FILES - DO NOT COMMIT TO GITHUB
+================================================================================
+
+The following files in this directory are for Aditya's academic presentation to
+Dr. Murari Mandal at KIIT University and should NEVER be committed to GitHub:
+
+FILES TO EXCLUDE:
+  • langchain-mcps-major-project-presentation.pptx
+  • generate_presentation.py
+
+REASON:
+  These are personal presentation materials for a major project submission.
+  They are NOT part of the langchain-mcps codebase.
+  They should only exist locally on your machine.
+
+GITIGNORE:
+  The .gitignore file explicitly lists these files.
+  Git will automatically reject any attempt to commit them.
+
+IF YOU ACCIDENTALLY STAGE THEM:
+  Run: git reset HEAD <filename>
+  Or:  git reset HEAD .  (to unstage all)
+
+AFTER YOUR PRESENTATION:
+  You can delete these files locally or keep them archived outside the repo.
+  Either way, they will never be in the GitHub repository.
+
+================================================================================
+Generated: March 2026
+For: KIIT University Major Project Submission
+Author: Aditya Saxena
+Advisor: Dr. Murari Mandal
+================================================================================
