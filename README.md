@@ -350,4 +350,66 @@ Built on proven authorization patterns:
 - **RFC 8693 Token Exchange** — standardized JWT delegation format (used by Azure AD, ZITADEL)
 - **SAML AssertionID nonce cache** — replay prevention
 
+---
+
+## Roadmap
+
+### v2.4 — Enterprise-Scale Delegation
+
+Deferred features for multi-process deployments and agent orchestration.
+
+#### [v2.4.1] Distributed Quota & Nonce Storage (Redis backend) · [#9](https://github.com/Anakintano/langchain-mcp-secure/issues/9)
+
+**Status:** Planned · **Effort:** 1–2 weeks
+
+Current `QuotaPool` and `DelegationTokenValidator._nonce_cache` are in-memory and process-local.
+In multi-replica deployments a replayed token can be accepted by a different process.
+
+- Redis-backed `QuotaPool` (atomic `ZADD + ZCOUNT`, survives restarts)
+- Redis-backed nonce cache (atomic `SET NX EX`, shared across processes)
+- Automatic fallback to in-memory if Redis is unavailable
+
+#### [v2.4.2] Multi-Hop Delegation (A→B→C chains) · [#10](https://github.com/Anakintano/langchain-mcp-secure/issues/10)
+
+**Status:** Planned · **Effort:** 2–3 weeks · **Blocked by:** #9
+
+Enables agent orchestration where Agent B can securely delegate a subset of its work to Agent C.
+
+- Cycle detection — prevents A→B→A loops (DFS over `delegation_chain` field)
+- Escalation prevention — B's caps when delegating to C must be ⊆ A's original grant to B
+- Configurable max depth (default 1 for MVP, up to 3 hops planned)
+
+### v2.5 — Token-Native Permissions & Async
+
+Fine-grained per-token controls and non-blocking delegation verification.
+
+#### [v2.5.1] Time Windows & Permission Gates in Tokens · [#11](https://github.com/Anakintano/langchain-mcp-secure/issues/11)
+
+**Status:** Planned · **Effort:** 1–2 weeks
+
+Allow A to embed explicit `permission_windows` and `permission_gates` inside the token itself, independent of A's passport. Example: "B may use `database_read` only between 02:00–04:00 tonight, and only if the approver webhook says yes."
+
+- Intersection at token creation (B cannot get a wider window than A's passport allows)
+- Window + gate checks added to Step 5 of the verification gate
+
+#### [v2.5.2] Async Delegation Gate (ainvoke support) · [#12](https://github.com/Anakintano/langchain-mcp-secure/issues/12)
+
+**Status:** Planned · **Effort:** 3–4 days
+
+`MCPSChainWrapper.ainvoke()` currently calls synchronous `_gate()`, blocking the event loop.
+
+- `DelegationTokenValidator.verify_async()` — non-blocking 6-step verification
+- `QuotaPool.check_and_decrement_async()` — async quota accounting (benefits from v2.4.1 Redis)
+- `MCPSChainWrapper._gate_async()` wired into `ainvoke()`, `astream()`, `abatch()`
+
+### Contributing
+
+All roadmap features are open for community contributions.
+
+1. Comment on the linked issue to claim it
+2. Open a draft PR early so we can align on approach
+3. Reference the issue and this roadmap in your PR description
+
+Current test baseline: **137 tests · 90% coverage** — new features should maintain or improve this.
+
 
