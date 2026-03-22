@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 import fnmatch
-from typing import Any, Dict, Tuple
+import time
+from typing import Any, Dict, Optional, Tuple
 
 from .schema import CapabilitySchema
 
@@ -81,3 +82,72 @@ class CapabilityValidator:
                 return False, f"File size {size_mb}MB exceeds max_file_size_mb {max_size}MB"
 
         return True, ""
+
+    def validate_time_window(
+        self, tool_name: str, current_time: Optional[float] = None
+    ) -> Tuple[bool, str]:
+        """
+        Validate that current time falls within a permission window for the tool.
+
+        If no windows configured, returns (True, "") — always allowed (v1.0/v2.0 compat).
+        If windows exist, checks if now >= window.start_time AND now < window.end_time
+        for ANY window. Uses OR logic: allowed if in ANY window.
+
+        Args:
+            tool_name: Name of the tool.
+            current_time: Current time as float seconds (UNIX epoch).
+                         Defaults to time.time() if not provided.
+
+        Returns:
+            Tuple of (is_valid, reason). reason is empty string on success.
+        """
+        if current_time is None:
+            current_time = time.time()
+
+        windows = self._schema.get_permission_windows(tool_name)
+        if windows is None:
+            # No time windows configured = always allowed (backward compat)
+            return True, ""
+
+        # Check if current_time falls within ANY window [start, end)
+        for window in windows:
+            start_time = window.get("start_time")
+            end_time = window.get("end_time")
+            if start_time is not None and end_time is not None:
+                if start_time <= current_time < end_time:
+                    # In this window, allowed
+                    return True, ""
+
+        # Not in any window, denied
+        return False, f"current time {current_time} outside all permission windows"
+
+    def validate_permission_gate(
+        self,
+        tool_name: str,
+        gate_config: Dict[str, Any],
+        gate_callback: Any = None,
+    ) -> Tuple[bool, str]:
+        """
+        Validate a permission gate via external callback.
+
+        Permission gates require external approval (e.g., webhook, manual review).
+        The gate_callback is responsible for returning (is_allowed, reason).
+
+        Args:
+            tool_name: Name of the tool.
+            gate_config: Gate configuration dict.
+            gate_callback: Callback function(tool_name, gate_config) -> (bool, str).
+                          Required to validate gate.
+
+        Returns:
+            Tuple of (is_valid, reason).
+        """
+        if gate_callback is None:
+            return False, f"permission gate for '{tool_name}' requires callback but none provided"
+
+        try:
+            is_allowed, reason = gate_callback(tool_name, gate_config)
+            return is_allowed, reason
+        except Exception as e:
+            error_str = str(e)
+            return False, f"permission gate callback failed: {error_str}"
