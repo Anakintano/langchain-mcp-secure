@@ -8,10 +8,16 @@ License: MIT
 
 from .callback import MCPSCallbackHandler
 from .middleware import MCPSChainWrapper, with_mcps
+from .capabilities import CapabilitySchema, CapabilityValidator, CapabilityEnforcer, Constraint, RateLimitWindow
 
 __version__ = "0.1.0"
 __all__ = [
     "MCPSCallbackHandler",
     "MCPSChainWrapper",
     "with_mcps",
+    "CapabilitySchema",
+    "CapabilityValidator",
+    "CapabilityEnforcer",
+    "Constraint",
+    "RateLimitWindow",
 ]
