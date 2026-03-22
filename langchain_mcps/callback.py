@@ -52,6 +52,8 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         on_rejected: Optional[Callable] = None,
         on_action: Optional[Callable] = None,
         on_merkle_root_finalized: Optional[Callable] = None,
+        on_permission_gate_triggered: Optional[Callable] = None,
+        current_time_provider: Optional[Callable[[], float]] = None,
     ):
         self.passport = passport
         self.authority_public_key = authority_public_key
@@ -63,9 +65,37 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         self.on_rejected = on_rejected
         self.on_action = on_action
         self.on_merkle_root_finalized = on_merkle_root_finalized
+        self.on_permission_gate_triggered = on_permission_gate_triggered
+        self._current_time_provider = current_time_provider or (lambda: time.time())
         self._verified = False
         self._passport_id = passport.get("passport_id", "")
         self._audit_chain = AuditChain()
+
+    def _check_permission_gate(self, tool_name: str) -> tuple:
+        """Check permission gate for a tool (v2.2)."""
+        from .capabilities import CapabilitySchema, CapabilityValidator
+        schema = CapabilitySchema(self.passport.get("capabilities"))
+
+        if not schema.is_v2:
+            return True, ""
+
+        gates = schema.get_permission_gates(tool_name)
+        if gates is None:
+            return True, ""
+
+        if not gates:
+            return True, ""
+
+        # At least one gate exists - need callback
+        for gate in gates:
+            validator = CapabilityValidator(schema)
+            is_allowed, reason = validator.validate_permission_gate(
+                tool_name, gate, self.on_permission_gate_triggered
+            )
+            if not is_allowed:
+                return False, reason
+
+        return True, ""
 
     def _verify_identity(self, event: str) -> bool:
         """Core verification -- passport format, signature, expiry, trust level, revocation."""
@@ -152,8 +182,33 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         """Verify identity and sign when a tool is invoked."""
         if not self._verified:
             self._verify_identity("tool_start")
+
+        # Capability + time window check (v2.0/v2.2)
+        from .capabilities import CapabilitySchema, CapabilityValidator
+        schema = CapabilitySchema(self.passport.get("capabilities"))
+        validator = CapabilityValidator(schema)
+
+        tool_name = serialized.get("name", "unknown")
+        current_time = self._current_time_provider()
+
+        # Implicit deny: tool must be listed in capabilities (v2.0+)
+        if schema.is_v2 and not schema.is_tool_allowed(tool_name):
+            self._reject("tool_start", f"tool_not_allowed: '{tool_name}' not in passport capabilities")
+
+        # Check time windows
+        if schema.is_v2:
+            time_valid, time_reason = validator.validate_time_window(tool_name, current_time)
+            if not time_valid:
+                self._reject("tool_start", f"time_window_check_failed: {time_reason}")
+
+        # Permission gate check (v2.2)
+        if schema.is_v2:
+            gate_valid, gate_reason = self._check_permission_gate(tool_name)
+            if not gate_valid:
+                self._reject("tool_start", f"permission_gate_denied: {gate_reason}")
+
         self._sign_action("tool_start", {
-            "tool": serialized.get("name", "unknown"),
+            "tool": tool_name,
         })
 
     def on_agent_action(self, action: Any, **kwargs) -> None:

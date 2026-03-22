@@ -90,3 +90,44 @@ class CapabilitySchema:
         """
         constraints = self.get_constraints(tool_name)
         return constraints.get("rate_limit")
+
+    def get_permission_windows(self, tool_name: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get the time-window-based permission list for a tool (v2.2).
+
+        Each window specifies a [start_time, end_time) interval during which
+        the tool is allowed. If multiple windows exist, agent is allowed if
+        in ANY window (OR logic).
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            List of dicts with {start_time: float, end_time: float, trust_level_required: Optional[int]},
+            or None if no windows configured (always allowed, backward compat).
+        """
+        if not self.is_v2:
+            return None
+        assert self._capabilities is not None
+        tool_config = self._capabilities.get(tool_name, {})
+        return tool_config.get("permission_windows")
+
+    def get_permission_gates(self, tool_name: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get the event-gated permission list for a tool (v2.2).
+
+        Each gate specifies an external decision point (e.g., manual approval,
+        webhook validation). Agent must pass gate callback to invoke tool.
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            List of dicts with {gate_type: str, config: Dict},
+            or None if no gates configured.
+        """
+        if not self.is_v2:
+            return None
+        assert self._capabilities is not None
+        tool_config = self._capabilities.get(tool_name, {})
+        return tool_config.get("permission_gates")
