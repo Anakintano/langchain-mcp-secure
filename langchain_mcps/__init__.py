@@ -9,8 +9,9 @@ License: MIT
 from .callback import MCPSCallbackHandler
 from .middleware import MCPSChainWrapper, with_mcps
 from .capabilities import CapabilitySchema, CapabilityValidator, CapabilityEnforcer, Constraint, RateLimitWindow
+from .delegation import DelegationToken, DelegationTokenValidator, DelegationVerificationResult, QuotaPool, intersect_capabilities
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "MCPSCallbackHandler",
     "MCPSChainWrapper",
@@ -20,4 +21,9 @@ __all__ = [
     "CapabilityEnforcer",
     "Constraint",
     "RateLimitWindow",
+    "DelegationToken",
+    "DelegationTokenValidator",
+    "DelegationVerificationResult",
+    "QuotaPool",
+    "intersect_capabilities",
 ]

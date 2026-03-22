@@ -16,6 +16,7 @@ from mcp_secure import (
 )
 
 from .audit_chain import AuditChain
+from .delegation import DelegationToken, DelegationTokenValidator, DelegationVerificationResult
 
 
 class MCPSCallbackHandler(BaseCallbackHandler):
@@ -54,6 +55,8 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         on_merkle_root_finalized: Optional[Callable] = None,
         on_permission_gate_triggered: Optional[Callable] = None,
         current_time_provider: Optional[Callable[[], float]] = None,
+        delegation_token_jwt: Optional[str] = None,
+        delegator_passport: Optional[Dict[str, Any]] = None,
     ):
         self.passport = passport
         self.authority_public_key = authority_public_key
@@ -70,6 +73,10 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         self._verified = False
         self._passport_id = passport.get("passport_id", "")
         self._audit_chain = AuditChain()
+        # v2.3: delegation support
+        self._delegation_token_jwt = delegation_token_jwt
+        self._delegator_passport = delegator_passport
+        self._delegation_validator = DelegationTokenValidator()
 
     def _check_permission_gate(self, tool_name: str) -> tuple:
         """Check permission gate for a tool (v2.2)."""
@@ -132,6 +139,49 @@ class MCPSCallbackHandler(BaseCallbackHandler):
             self.on_verified(self._passport_id, event)
         return True
 
+    def _verify_delegation(self, tool_name: str, current_time: float) -> DelegationVerificationResult:
+        """Verify delegation token (Steps 2-6). Step 1 must already have passed."""
+        if self._delegator_passport is None:
+            self._reject("tool_start", "delegation_missing_delegator_passport")
+
+        delegator_pub_key = self._delegator_passport.get("public_key", "")  # type: ignore[union-attr]
+        delegator_pid = self._delegator_passport.get("passport_id", "")  # type: ignore[union-attr]
+        delegatee_pid = self._passport_id
+
+        result = self._delegation_validator.verify(
+            token_jwt=self._delegation_token_jwt,  # type: ignore[arg-type]
+            delegator_public_key=delegator_pub_key,
+            delegatee_agent_id=delegatee_pid,
+            delegator_passport_id=delegator_pid,
+            requested_tool=tool_name,
+            current_time=current_time,
+        )
+
+        if not result.valid:
+            # Log delegation rejection in audit chain then raise
+            self._audit_chain.append({
+                "timestamp": current_time,
+                "event": "tool_start",
+                "passport_id": self._passport_id,
+                "action": "rejected",
+                "reason": result.reason,
+            })
+            if self.on_rejected:
+                self.on_rejected(self._passport_id, result.reason)
+            raise PermissionError(
+                f"MCPS delegation: {self._passport_id} rejected — {result.reason}"
+            )
+
+        # Log successful delegation verification
+        self._audit_chain.append({
+            "timestamp": current_time,
+            "event": "delegation_verified",
+            "passport_id": self._passport_id,
+            "action": "delegation_verified",
+            "reason": f"delegated_by:{delegator_pid}",
+        })
+        return result
+
     def _reject(self, event: str, reason: str) -> None:
         """Handle rejection."""
         self._verified = False
@@ -183,29 +233,35 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         if not self._verified:
             self._verify_identity("tool_start")
 
-        # Capability + time window check (v2.0/v2.2)
-        from .capabilities import CapabilitySchema, CapabilityValidator
-        schema = CapabilitySchema(self.passport.get("capabilities"))
-        validator = CapabilityValidator(schema)
-
         tool_name = serialized.get("name", "unknown")
         current_time = self._current_time_provider()
 
-        # Implicit deny: tool must be listed in capabilities (v2.0+)
-        if schema.is_v2 and not schema.is_tool_allowed(tool_name):
-            self._reject("tool_start", f"tool_not_allowed: '{tool_name}' not in passport capabilities")
+        if self._delegation_token_jwt is not None:
+            # v2.3 delegation mode: 6-step token verification is authoritative.
+            # Passport capability checks (v2.0/v2.2) are bypassed — the token
+            # already carries the intersected, verifier-enforced permissions.
+            self._verify_delegation(tool_name, current_time)
+        else:
+            # Normal mode: capability + time window + gate checks (v2.0/v2.2)
+            from .capabilities import CapabilitySchema, CapabilityValidator
+            schema = CapabilitySchema(self.passport.get("capabilities"))
+            validator = CapabilityValidator(schema)
 
-        # Check time windows
-        if schema.is_v2:
-            time_valid, time_reason = validator.validate_time_window(tool_name, current_time)
-            if not time_valid:
-                self._reject("tool_start", f"time_window_check_failed: {time_reason}")
+            # Implicit deny: tool must be listed in capabilities (v2.0+)
+            if schema.is_v2 and not schema.is_tool_allowed(tool_name):
+                self._reject("tool_start", f"tool_not_allowed: '{tool_name}' not in passport capabilities")
 
-        # Permission gate check (v2.2)
-        if schema.is_v2:
-            gate_valid, gate_reason = self._check_permission_gate(tool_name)
-            if not gate_valid:
-                self._reject("tool_start", f"permission_gate_denied: {gate_reason}")
+            # Check time windows
+            if schema.is_v2:
+                time_valid, time_reason = validator.validate_time_window(tool_name, current_time)
+                if not time_valid:
+                    self._reject("tool_start", f"time_window_check_failed: {time_reason}")
+
+            # Permission gate check (v2.2)
+            if schema.is_v2:
+                gate_valid, gate_reason = self._check_permission_gate(tool_name)
+                if not gate_valid:
+                    self._reject("tool_start", f"permission_gate_denied: {gate_reason}")
 
         self._sign_action("tool_start", {
             "tool": tool_name,
