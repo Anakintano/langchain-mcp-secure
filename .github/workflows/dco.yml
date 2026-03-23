@@ -1,0 +1,49 @@
+name: DCO Check
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+    - name: Check DCO sign-off
+      uses: agilepathway/label-checker@main
+      continue-on-error: true
+
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Verify Signed-off-by in commits
+      run: |
+        echo "Checking for DCO Signed-off-by in all commits..."
+        MISSING=0
+        for commit in $(git log origin/main..HEAD --format="%H"); do
+          MSG=$(git log --format="%B" -n 1 $commit)
+          if ! echo "$MSG" | grep -q "Signed-off-by:"; then
+            echo "FAIL: Commit $commit is missing Signed-off-by"
+            echo "Message: $MSG"
+            MISSING=1
+          else
+            echo "OK: Commit $commit has Signed-off-by"
+          fi
+        done
+        if [ $MISSING -eq 1 ]; then
+          echo ""
+          echo "One or more commits are missing a DCO sign-off."
+          echo "Add sign-off with: git commit -s"
+          echo "Or amend: git commit --amend -s"
+          exit 1
+        fi
+        echo "All commits have DCO sign-off."

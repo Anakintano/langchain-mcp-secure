@@ -10,6 +10,33 @@ Add zero-trust identity verification to any LangChain agent or chain with one li
 pip install langchain-mcpsecure
 ```
 
+## Build from Source
+
+Requirements: Python 3.9+, `git`
+
+```bash
+# Clone the repository
+git clone https://github.com/Anakintano/langchain-mcp-secure.git
+cd langchain-mcp-secure
+
+# Install in editable mode with all dependencies
+pip install -e .
+
+# Install development tools (testing, linting)
+pip install pytest pytest-cov pylint mypy bandit
+
+# Run tests to verify the build
+pytest tests/ -v --cov=langchain_mcps
+```
+
+**Required libraries:**
+- `mcp-secure>=1.0.0` — ECDSA P-256 passport signing (automatically installed)
+- `langchain-core>=0.2.0` — LangChain callback hooks (automatically installed)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dependency selection policy and contributor guide.
+
+---
+
 ## Quick Start
 
 ### Callback Handler (recommended)
@@ -170,6 +197,55 @@ signed_root = handler.sign_merkle_root()
 ### `with_mcps(chain, passport, authority_public_key, **kwargs)`
 
 Convenience wrapper. Returns an `MCPSChainWrapper` with `.invoke()`, `.ainvoke()`, `.stream()`, `.batch()`.
+
+---
+
+### `DelegationToken` (v2.3)
+
+RFC 8693 JWT carrying agent-to-agent delegation authorization.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `create` | `(delegator_id, delegatee_id, delegator_caps, requested_caps, ttl=1800)` | Create token with capability intersection |
+| `to_jwt` | `(private_key: str) → str` | Sign and encode as JWT string |
+| `from_jwt` | `(token_str, public_key, verify_exp=True, current_time=None)` | Decode and validate JWT |
+| `intersect_capabilities` | `(delegator_caps, requested_caps) → dict` | Compute capability intersection |
+
+**Token fields:** `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, `act`, `capabilities`, `parent_passport_id`, `delegation_depth`, `max_delegation_depth`
+
+---
+
+### `DelegationTokenValidator` (v2.3)
+
+Stateful 6-step verification gate with replay prevention.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `verify` | `(token_jwt, delegator_public_key, delegatee_agent_id, delegator_passport_id, requested_tool, current_time=None) → DelegationVerificationResult` | Run full 6-step verification |
+| `revoke_token` | `(jti: str)` | Add token JTI to revocation list |
+
+**`DelegationVerificationResult` fields:** `valid: bool`, `reason: str`, `token: DelegationToken | None`
+
+---
+
+### `QuotaPool` (v2.3)
+
+Shared sliding-window rate limiter. All delegates of a parent agent share one budget per tool.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `check_and_decrement` | `(parent_agent_id, tool_name, limit, window, current_time=None) → (bool, str, int)` | Check quota; returns `(allowed, reason, remaining)` |
+| `get_remaining` | `(parent_agent_id, tool_name, limit, window, current_time=None) → int` | Get remaining calls in window |
+
+---
+
+### `intersect_capabilities(delegator_caps, requested_caps) → dict` (v2.3)
+
+Computes capability intersection. The result is always a subset of `delegator_caps` — prevents escalation.
+
+- `allowed_tables`: set intersection
+- `rate_limit`: `min(delegator, requested)` per field
+- Other constraints: delegator's value wins
 
 ---
 
@@ -530,5 +606,15 @@ All roadmap features are open for community contributions.
 3. Reference the issue and this roadmap in your PR description
 
 Current test baseline: **137 tests · 90% coverage** — new features should maintain or improve this.
+
+---
+
+## Project Governance
+
+| Document | Purpose |
+|----------|---------|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor guide, DCO sign-off, dependency policy, roles & responsibilities |
+| [SECURITY.md](SECURITY.md) | CVD policy, private vulnerability reporting, disclosure process |
+| [CHANGELOG.md](CHANGELOG.md) | Functional and security changes per release |
 
 
