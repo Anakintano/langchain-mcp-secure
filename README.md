@@ -7,7 +7,7 @@ Add zero-trust identity verification to any LangChain agent or chain with one li
 ## Install
 
 ```bash
-pip install langchain-mcps
+pip install langchain-mcpsecure
 ```
 
 ## Quick Start

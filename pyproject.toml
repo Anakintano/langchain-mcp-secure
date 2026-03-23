@@ -3,13 +3,13 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "langchain-mcps"
-version = "0.1.0"
-description = "MCPS (MCP Secure) integration for LangChain -- cryptographic identity and trust verification for AI agents."
+name = "langchain-mcpsecure"
+version = "0.2.0"
+description = "5-layer security framework for AI agents: identity, capabilities, audit, time-bound permissions, and delegation chains."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
-authors = [{name = "CyberSecAI Ltd"}]
+authors = [{name = "Aditya Saxena"}]
 keywords = [
     "langchain", "mcps", "mcp-secure", "agent-security",
     "agent-identity", "passport", "ecdsa", "trust",
@@ -34,9 +34,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://agentsign.dev"
-Repository = "https://github.com/razashariff/langchain-mcps"
-Documentation = "https://agentsign.dev/docs/langchain"
+Homepage = "https://github.com/Anakintano/langchain-mcps"
+Repository = "https://github.com/Anakintano/langchain-mcps"
+Documentation = "https://github.com/Anakintano/langchain-mcps/blob/main/README.md"
 
 [tool.setuptools.packages.find]
 include = ["langchain_mcps*"]
