@@ -1,5 +1,8 @@
 # langchain-mcps
 
+[![PyPI version](https://img.shields.io/pypi/v/langchain-mcpsecure.svg)](https://pypi.org/project/langchain-mcpsecure/)
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/12236/baseline)](https://www.bestpractices.dev/projects/12236)
+
 **MCPS (MCP Secure) integration for LangChain** -- cryptographic identity and trust verification for AI agents.
 
 Add zero-trust identity verification to any LangChain agent or chain with one line of code.
