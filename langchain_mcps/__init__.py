@@ -9,9 +9,18 @@ License: MIT
 from .callback import MCPSCallbackHandler
 from .middleware import MCPSChainWrapper, with_mcps
 from .capabilities import CapabilitySchema, CapabilityValidator, CapabilityEnforcer, Constraint, RateLimitWindow
-from .delegation import DelegationToken, DelegationTokenValidator, DelegationVerificationResult, QuotaPool, intersect_capabilities
+from .delegation import (
+    DelegationToken, DelegationTokenValidator, DelegationVerificationResult,
+    QuotaPool, intersect_capabilities, QuotaBackend, InMemoryQuotaBackend, QuotaExhausted,
+)
+from .anomaly_detector import AnomalyDetector, AnomalySignal
+from .viral_detector import ViralDetector
+from .passport_pop import (
+    PassportPoP, PassportCnf, PassportPoPGenerator, PassportPoPVerifier,
+    create_cnf_claim, extract_public_key_from_cnf,
+)
 
-__version__ = "0.2.0"
+__version__ = "0.2.5"
 __all__ = [
     "MCPSCallbackHandler",
     "MCPSChainWrapper",
@@ -26,4 +35,15 @@ __all__ = [
     "DelegationVerificationResult",
     "QuotaPool",
     "intersect_capabilities",
+    "QuotaBackend",
+    "InMemoryQuotaBackend",
+    "QuotaExhausted",
+    "AnomalyDetector",
+    "AnomalySignal",
+    "PassportPoP",
+    "PassportCnf",
+    "PassportPoPGenerator",
+    "PassportPoPVerifier",
+    "create_cnf_claim",
+    "extract_public_key_from_cnf",
 ]

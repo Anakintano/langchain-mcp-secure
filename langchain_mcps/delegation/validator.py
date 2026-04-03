@@ -144,11 +144,22 @@ class DelegationTokenValidator:
                 f"{token.parent_passport_id!r} != delegator={delegator_passport_id!r}",
             )
 
-        if token.delegation_depth > token.max_delegation_depth:
+        if token.max_delegation_depth is not None and token.delegation_depth > token.max_delegation_depth:
             return DelegationVerificationResult(
                 False,
                 f"delegation_depth_exceeded: depth={token.delegation_depth} "
                 f"> max={token.max_delegation_depth}",
+            )
+
+        # ── Step 6b: Chain path well-formed ──────────────────────────────────
+        chain = token.delegation_chain_path or []
+        if len(chain) != len(set(chain)):
+            return DelegationVerificationResult(False, "delegation_chain_path_contains_duplicates")
+        # Depth should match chain length (chain holds ancestors, not the delegatee itself)
+        if chain and token.delegation_depth != len(chain):
+            return DelegationVerificationResult(
+                False,
+                f"delegation_chain_path_length_mismatch: len={len(chain)} != depth={token.delegation_depth}",
             )
 
         return DelegationVerificationResult(

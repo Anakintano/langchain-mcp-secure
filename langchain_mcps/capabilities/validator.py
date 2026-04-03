@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import fnmatch
+import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -62,10 +63,14 @@ class CapabilityValidator:
 
         # allowed_paths
         if "allowed_paths" in constraints:
-            path = tool_params.get("path", "")
+            raw_path = tool_params.get("path", "")
+            # Canonicalize path to prevent traversal attacks (e.g., /data/../etc/passwd)
+            path = os.path.realpath(raw_path) if raw_path else ""
             patterns = constraints["allowed_paths"]
-            if not any(fnmatch.fnmatch(path, p) for p in patterns):
-                return False, f"Path '{path}' does not match allowed_paths {patterns}"
+            # Also canonicalize absolute patterns for comparison
+            resolved_patterns = [os.path.realpath(p) if os.path.isabs(p) else p for p in patterns]
+            if not any(fnmatch.fnmatch(path, p) for p in resolved_patterns):
+                return False, f"Path '{raw_path}' (resolved: '{path}') does not match allowed_paths {patterns}"
 
         # max_rows_per_query
         if "max_rows_per_query" in constraints:
@@ -151,3 +156,72 @@ class CapabilityValidator:
         except Exception as e:
             error_str = str(e)
             return False, f"permission gate callback failed: {error_str}"
+
+    def validate_data_provenance(
+        self,
+        tool_name: str,
+        tool_output: Any,
+        provenance_metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Validate tool output against data provenance constraints before the LLM
+        processes it.
+
+        Guards against:
+        - Data arriving from untrusted/unallowed sources (IPI via data channel).
+        - Forbidden multimodal content types (adversarial images/audio).
+
+        Constraint format (in passport capabilities)::
+
+            "file_read": {
+                "allowed": True,
+                "constraints": {
+                    "data_provenance": {
+                        "allowed_sources": ["s3://trusted-bucket"],
+                        "forbidden_content_types": ["image", "audio"],
+                        "require_provenance_tag": True
+                    }
+                }
+            }
+
+        Args:
+            tool_name: Name of the tool that produced the output.
+            tool_output: The data returned by the tool.
+            provenance_metadata: Optional dict with at least a "source" key.
+
+        Returns:
+            True if the output is safe to forward to the LLM.
+
+        Raises:
+            PermissionError: If provenance validation fails.
+        """
+        constraints = self._schema.get_constraints(tool_name)
+        prov_config = constraints.get("data_provenance")
+        if not prov_config:
+            return True  # No provenance constraint — allow
+
+        allowed_sources = prov_config.get("allowed_sources", [])
+        forbidden_types = prov_config.get("forbidden_content_types", [])
+        require_tag = prov_config.get("require_provenance_tag", False)
+
+        # Source check
+        if provenance_metadata is not None:
+            source = provenance_metadata.get("source")
+            if allowed_sources and source not in allowed_sources:
+                raise PermissionError(
+                    f"Source '{source}' not in allowed_sources {allowed_sources} for '{tool_name}'"
+                )
+        elif require_tag:
+            raise PermissionError(
+                f"Provenance metadata required but not provided for '{tool_name}'"
+            )
+
+        # Content-type check (multimodal filtering)
+        if isinstance(tool_output, dict) and "content_type" in tool_output:
+            content_type = tool_output["content_type"]
+            if content_type in forbidden_types:
+                raise PermissionError(
+                    f"Content type '{content_type}' is forbidden for '{tool_name}'"
+                )
+
+        return True

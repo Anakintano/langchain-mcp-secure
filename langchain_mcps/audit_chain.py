@@ -12,7 +12,11 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.backends import default_backend
 
 
 def _sha256(data: str) -> str:
@@ -27,6 +31,12 @@ class AuditChainEntry:
 
     Each entry contains the standard audit fields plus cryptographic
     linkage to the previous entry via hash chaining.
+
+    v2.4 additions:
+        delegation_chain_path: Full ancestor chain of the acting agent.
+        delegation_depth: Depth in the delegation tree.
+        parameter_passing_integrity: "preserved" or "narrowed" — records whether
+            capability constraints were narrowed at this delegation hop.
     """
 
     timestamp: float
@@ -37,6 +47,13 @@ class AuditChainEntry:
     # Optional fields
     reason: Optional[str] = None
     error: Optional[str] = None
+    # v2.4 delegation forensics
+    delegation_chain_path: Optional[List[str]] = None
+    delegation_depth: Optional[int] = None
+    parameter_passing_integrity: Optional[str] = None
+    # v2.5 PoP and other extensible fields
+    tool: Optional[str] = None
+    pop_jti: Optional[str] = None
     # Computed on creation
     entry_hash: str = field(init=False)
 
@@ -50,6 +67,7 @@ class AuditChainEntry:
 
         Uses a deterministic JSON serialization (sorted keys) to ensure
         hash consistency across platforms and Python versions.
+        Includes delegation forensics fields so they are tamper-evident.
 
         Returns:
             SHA256 hex digest string.
@@ -62,6 +80,11 @@ class AuditChainEntry:
             "previous_entry_hash": self.previous_entry_hash,
             "reason": self.reason,
             "error": self.error,
+            "delegation_chain_path": self.delegation_chain_path,
+            "delegation_depth": self.delegation_depth,
+            "parameter_passing_integrity": self.parameter_passing_integrity,
+            "tool": self.tool,
+            "pop_jti": self.pop_jti,
         }
         serialized = json.dumps(data, sort_keys=True, separators=(",", ":"))
         return _sha256(serialized)
@@ -124,6 +147,11 @@ class AuditChain:
             previous_entry_hash=previous_hash,
             reason=entry_data.get("reason"),
             error=entry_data.get("error"),
+            delegation_chain_path=entry_data.get("delegation_chain_path"),
+            delegation_depth=entry_data.get("delegation_depth"),
+            parameter_passing_integrity=entry_data.get("parameter_passing_integrity"),
+            tool=entry_data.get("tool"),
+            pop_jti=entry_data.get("pop_jti"),
         )
         self._entries.append(entry)
         return entry
@@ -174,5 +202,83 @@ class AuditChain:
         """Read-only view of chain entries."""
         return list(self._entries)
 
+    def export_forensic_trail(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Return a structured forensic report for all actions taken by agent_id.
+
+        Enables investigators to trace full delegation lineage without manual
+        cross-referencing of separate audit records.
+
+        Args:
+            agent_id: passport_id of the agent whose actions to trace.
+
+        Returns:
+            Dict with agent_id and list of action dicts including delegation chain.
+        """
+        actions = []
+        for e in self._entries:
+            if e.passport_id != agent_id:
+                continue
+            chain = e.delegation_chain_path or []
+            actions.append({
+                "timestamp": e.timestamp,
+                "event": e.event,
+                "action": e.action,
+                "delegation_chain": chain,
+                "authorized_by": chain[0] if chain else "direct",
+                "delegation_depth": e.delegation_depth,
+                "parameter_integrity": e.parameter_passing_integrity,
+                "reason": e.reason,
+            })
+        return {"agent_id": agent_id, "actions": actions}
+
     def __len__(self) -> int:
         return len(self._entries)
+
+    def export_root(self, agent_private_key: str) -> Tuple[str, float, str]:
+        """
+        Export the merkle root with a signature for external anchoring.
+
+        Generates an ECDSA P-256 signature over (merkle_root_hex || timestamp)
+        using the agent's private key. This allows production deployments to
+        anchor the root to external durable stores (S3, certificate transparency
+        logs, TPM) for protection against process kill and VM rollback attacks.
+
+        Args:
+            agent_private_key: PEM-encoded ECDSA P-256 private key string.
+
+        Returns:
+            Tuple of (merkle_root_hex, timestamp, agent_signature_hex) where:
+            - merkle_root_hex: Current merkle root as hex string
+            - timestamp: Current time as float (seconds since epoch)
+            - agent_signature_hex: ECDSA signature as hex string
+
+        Raises:
+            ValueError: If audit chain is empty (no root to export).
+        """
+        root = self.get_merkle_root()
+        if root is None:
+            raise ValueError("Cannot export root from empty audit chain")
+
+        current_time = time.time()
+
+        # Load private key and sign (merkle_root_hex || timestamp)
+        try:
+            private_key_obj = serialization.load_pem_private_key(
+                agent_private_key.encode("utf-8"),
+                password=None,
+                backend=default_backend(),
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to load private key: {e}")
+
+        # Create signing data: concatenate root hex and timestamp
+        signing_data = f"{root}||{current_time}".encode("utf-8")
+
+        # Sign with ECDSA P-256
+        signature_bytes = private_key_obj.sign(signing_data, ec.ECDSA(hashes.SHA256()))
+
+        # Convert signature to hex string for transport
+        signature_hex = signature_bytes.hex()
+
+        return (root, current_time, signature_hex)

@@ -1,5 +1,5 @@
 """
-RFC 8693 delegation token for langchain-mcps v2.3.
+RFC 8693 delegation token for langchain-mcps v2.4.
 
 Agent A signs a DelegationToken granting Agent B a time-limited, capability-scoped
 authorisation. Capabilities in the token are the intersection of A's permissions and
@@ -122,8 +122,10 @@ class DelegationToken:
         act: RFC 8693 act claim {"sub": delegatee_id}.
         capabilities: Intersected capabilities (A's ∩ requested scope).
         parent_passport_id: Delegator's passport_id.
-        delegation_depth: Depth in chain (1 for MVP single-hop).
-        max_delegation_depth: Maximum allowed chain depth.
+        delegation_depth: Depth in chain (number of hops from root).
+        max_delegation_depth: Maximum allowed chain depth (None = unlimited).
+        delegation_chain_path: Ordered list of agent IDs from root to immediate delegator.
+        jti_chain: Ordered list of JTIs from root token to this token.
     """
 
     iss: str
@@ -136,7 +138,22 @@ class DelegationToken:
     capabilities: Dict[str, Any]
     parent_passport_id: str
     delegation_depth: int
-    max_delegation_depth: int
+    max_delegation_depth: Optional[int]
+    delegation_chain_path: List[str] = None  # type: ignore[assignment]
+    jti_chain: List[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.delegation_chain_path is None:
+            self.delegation_chain_path = []
+        if self.jti_chain is None:
+            self.jti_chain = []
+
+    def can_delegate_further(self) -> bool:
+        """Return True if this token is permitted to re-delegate."""
+        if self.max_delegation_depth is None:
+            return True
+        max_depth: int = self.max_delegation_depth  # type: ignore[assignment]
+        return self.delegation_depth < max_depth
 
     # ── Factory ──
 
@@ -147,6 +164,8 @@ class DelegationToken:
         delegator_capabilities: Dict[str, Any],
         requested_capabilities: Dict[str, Any],
         ttl_seconds: int = 1800,
+        parent_token: Optional["DelegationToken"] = None,
+        max_delegation_depth: Optional[int] = None,
     ) -> "DelegationToken":
         """
         Create a new delegation token with capability intersection.
@@ -157,27 +176,63 @@ class DelegationToken:
             delegator_capabilities: The delegator's full capabilities dict.
             requested_capabilities: The subset being delegated (requested scope).
             ttl_seconds: Token lifetime in seconds (default 30 min).
+            parent_token: If delegator is itself a delegatee, pass its token to
+                          propagate chain path and enforce depth limits.
+            max_delegation_depth: Override maximum delegation depth for the new token.
 
         Returns:
             Unsigned DelegationToken. Call .to_jwt(private_key) to sign.
 
         Raises:
-            ValueError: If requested capabilities exceed delegator's permissions.
+            ValueError: If requested capabilities exceed delegator's permissions,
+                        depth limit exceeded, or cycle detected.
         """
         caps = intersect_capabilities(delegator_capabilities, requested_capabilities)
         now = time.time()
+        new_jti = f"dt-{secrets.token_hex(16)}"
+
+        if parent_token is not None:
+            # Multi-hop: inherit chain from parent
+            # chain_path = full list of delegators from root to immediate delegator
+            parent_chain = list(parent_token.delegation_chain_path or [])
+
+            # Cycle detection: delegatee must not already appear in the chain
+            if delegatee_agent_id in parent_chain:
+                raise ValueError(
+                    f"Delegation cycle detected: '{delegatee_agent_id}' already in chain {parent_chain}"
+                )
+
+            # Depth limit check: parent must still be allowed to delegate
+            if not parent_token.can_delegate_further():
+                raise ValueError(
+                    f"Delegation depth limit ({parent_token.max_delegation_depth}) exceeded"
+                )
+
+            new_chain = parent_chain + [delegator_agent_id]
+            new_depth = len(new_chain)
+            inherited_max = max_delegation_depth if max_delegation_depth is not None else parent_token.max_delegation_depth
+            new_jti_chain = list(parent_token.jti_chain) + [new_jti]
+        else:
+            # First hop: chain starts with the delegator (root issuer)
+            new_chain = [delegator_agent_id]
+            new_depth = 1
+            inherited_max = max_delegation_depth
+            new_jti_chain = [new_jti]
+
         return DelegationToken(
             iss=delegator_agent_id,
             sub=delegatee_agent_id,
             aud="langchain-mcps",
             iat=now,
             exp=now + ttl_seconds,
-            jti=f"dt-{secrets.token_hex(16)}",
+            jti=new_jti,
             act={"sub": delegatee_agent_id},
             capabilities=caps,
             parent_passport_id=delegator_agent_id,
-            delegation_depth=1,
-            max_delegation_depth=1,
+            delegation_depth=new_depth,
+            max_delegation_depth=inherited_max,
+            delegation_chain_path=new_chain,
+            jti_chain=new_jti_chain,
         )
 
     # ── Serialisation ──
@@ -196,6 +251,8 @@ class DelegationToken:
             "parent_passport_id": self.parent_passport_id,
             "delegation_depth": self.delegation_depth,
             "max_delegation_depth": self.max_delegation_depth,
+            "delegation_chain_path": self.delegation_chain_path,
+            "jti_chain": self.jti_chain,
         }
         return pyjwt.encode(payload, private_key, algorithm="ES256")
 
@@ -241,6 +298,7 @@ class DelegationToken:
             options=options,
             leeway=leeway,
         )
+        raw_max = payload.get("max_delegation_depth")
         return DelegationToken(
             iss=payload["iss"],
             sub=payload["sub"],
@@ -252,7 +310,9 @@ class DelegationToken:
             capabilities=payload["capabilities"],
             parent_passport_id=payload["parent_passport_id"],
             delegation_depth=int(payload["delegation_depth"]),
-            max_delegation_depth=int(payload["max_delegation_depth"]),
+            max_delegation_depth=int(raw_max) if raw_max is not None else None,
+            delegation_chain_path=list(payload.get("delegation_chain_path") or []),
+            jti_chain=list(payload.get("jti_chain") or []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -269,4 +329,6 @@ class DelegationToken:
             "parent_passport_id": self.parent_passport_id,
             "delegation_depth": self.delegation_depth,
             "max_delegation_depth": self.max_delegation_depth,
+            "delegation_chain_path": list(self.delegation_chain_path),
+            "jti_chain": list(self.jti_chain),
         }

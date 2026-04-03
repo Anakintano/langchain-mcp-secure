@@ -17,6 +17,7 @@ from mcp_secure import (
 
 from .audit_chain import AuditChain
 from .delegation import DelegationToken, DelegationTokenValidator, DelegationVerificationResult
+from .passport_pop import PassportPoPVerifier, PassportPoPGenerator, extract_public_key_from_cnf
 
 
 class MCPSCallbackHandler(BaseCallbackHandler):
@@ -57,6 +58,7 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         current_time_provider: Optional[Callable[[], float]] = None,
         delegation_token_jwt: Optional[str] = None,
         delegator_passport: Optional[Dict[str, Any]] = None,
+        verify_pop: bool = False,
     ):
         self.passport = passport
         self.authority_public_key = authority_public_key
@@ -77,6 +79,9 @@ class MCPSCallbackHandler(BaseCallbackHandler):
         self._delegation_token_jwt = delegation_token_jwt
         self._delegator_passport = delegator_passport
         self._delegation_validator = DelegationTokenValidator()
+        # v2.5: PoP support
+        self._verify_pop_enabled = verify_pop
+        self._pop_verifier = PassportPoPVerifier() if verify_pop else None
 
     def _check_permission_gate(self, tool_name: str) -> tuple:
         """Check permission gate for a tool (v2.2)."""
@@ -139,6 +144,54 @@ class MCPSCallbackHandler(BaseCallbackHandler):
             self.on_verified(self._passport_id, event)
         return True
 
+    def _verify_pop(self, tool_name: str, current_time: float) -> bool:
+        """Verify Proof-of-Possession for a tool invocation (v2.5).
+
+        If verify_pop is enabled, generates a PoP challenge and verifies the signature
+        using the passport's cnf claim.
+
+        Returns:
+            True if PoP verification passes (or PoP is disabled).
+            Raises PermissionError if PoP verification fails.
+        """
+        if not self._verify_pop_enabled or self._pop_verifier is None:
+            return True
+
+        # Extract public key from passport cnf claim
+        cnf = self.passport.get("cnf")
+        if cnf is None:
+            # No cnf claim — PoP verification required but passport lacks cnf
+            self._reject("tool_start", "passport_pop_missing_cnf_claim")
+
+        public_key_pem = extract_public_key_from_cnf(cnf)
+        if public_key_pem is None:
+            self._reject("tool_start", "passport_pop_cannot_extract_public_key")
+
+        # Generate PoP for this invocation
+        pop = PassportPoPGenerator.generate_pop(tool_name, self.private_key or "", timestamp=current_time)
+
+        # Verify PoP signature
+        valid, reason = self._pop_verifier.verify(
+            pop,
+            public_key_pem,
+            current_time=current_time,
+            expected_tool_name=tool_name,
+        )
+        if not valid:
+            self._reject("tool_start", f"passport_pop_verification_failed: {reason}")
+
+        # Log PoP verification in audit chain
+        self._audit_chain.append({
+            "timestamp": current_time,
+            "event": "pop_verified",
+            "passport_id": self._passport_id,
+            "action": "pop_verified",
+            "tool": tool_name,
+            "pop_jti": pop.jti,
+        })
+
+        return True
+
     def _verify_delegation(self, tool_name: str, current_time: float) -> DelegationVerificationResult:
         """Verify delegation token (Steps 2-6). Step 1 must already have passed."""
         if self._delegator_passport is None:
@@ -172,13 +225,16 @@ class MCPSCallbackHandler(BaseCallbackHandler):
                 f"MCPS delegation: {self._passport_id} rejected — {result.reason}"
             )
 
-        # Log successful delegation verification
+        # Log successful delegation verification with forensic chain data
+        tok = result.delegation_token
         self._audit_chain.append({
             "timestamp": current_time,
             "event": "delegation_verified",
             "passport_id": self._passport_id,
             "action": "delegation_verified",
             "reason": f"delegated_by:{delegator_pid}",
+            "delegation_chain_path": tok.delegation_chain_path if tok else None,
+            "delegation_depth": tok.delegation_depth if tok else None,
         })
         return result
 
@@ -235,6 +291,10 @@ class MCPSCallbackHandler(BaseCallbackHandler):
 
         tool_name = serialized.get("name", "unknown")
         current_time = self._current_time_provider()
+
+        # v2.5: PoP verification (if enabled)
+        if self._verify_pop:
+            self._verify_pop(tool_name, current_time)
 
         if self._delegation_token_jwt is not None:
             # v2.3 delegation mode: 6-step token verification is authoritative.
